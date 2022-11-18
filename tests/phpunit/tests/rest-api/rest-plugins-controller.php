@@ -439,6 +439,59 @@ class WP_REST_Plugins_Controller_Test extends WP_Test_REST_Controller_Testcase {
 	/**
 	 * @ticket 56221
 	 */
+	public function test_create_item_from_http_post_body_and_activate() {
+		wp_set_current_user( self::$super_admin );
+		$this->setup_plugin_download();
+
+		$test_file_path = DIR_TESTDATA . '/link-manager.zip';
+
+		$request = new WP_REST_Request( 'POST', self::BASE );
+		$request->set_header( 'Content-Type', 'application/zip' );
+		$request->set_header( 'Content-Disposition', 'attachment; filename=' . basename( $test_file_path ) );
+		$request->set_body( file_get_contents( $test_file_path ) );
+		$request->set_param( 'status', 'active' );
+
+		$response = rest_do_request( $request );
+		$this->assertNotWPError( $response->as_error() );
+		$this->assertSame( 201, $response->get_status() );
+		$this->assertSame( 'Link Manager', $response->get_data()['name'] );
+		$this->assertTrue( is_plugin_active( 'link-manager/link-manager.php' ) );
+	}
+
+	/**
+	 * @ticket 56221
+	 */
+	public function test_create_item_from_http_post_files_and_activate() {
+		wp_set_current_user( self::$super_admin );
+		$this->setup_plugin_download();
+
+		$test_file_path = DIR_TESTDATA . '/link-manager.zip';
+
+		$request = new WP_REST_Request( 'POST', self::BASE );
+		$request->set_file_params(
+			array(
+				'file' => array(
+					'file'     => file_get_contents( $test_file_path ),
+					'name'     => basename( $test_file_path ),
+					'size'     => filesize( $test_file_path ),
+					'tmp_name' => $test_file_path,
+				),
+			)
+		);
+		$request->set_header( 'Content-MD5', md5_file( $test_file_path ) );
+		$request->set_param( 'status', 'active' );
+
+		$response = rest_do_request( $request );
+		$this->assertNotWPError( $response->as_error() );
+		$this->assertSame( 201, $response->get_status() );
+		$this->assertSame( 'Link Manager', $response->get_data()['name'] );
+		$this->assertTrue( is_plugin_active( 'link-manager/link-manager.php' ) );
+	}
+
+
+	/**
+	 * @ticket 56221
+	 */
 	public function test_create_validate_require_one_of_slug_or_url_neither_present() {
 		wp_set_current_user( self::$super_admin );
 		$this->setup_plugin_download();

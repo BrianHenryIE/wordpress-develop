@@ -330,6 +330,22 @@ class WP_REST_Plugins_Controller extends WP_REST_Controller {
 			$plugin_url = $request['url'];
 		}
 
+		if ( ! isset( $plugin_url ) ) {
+			// Get the file via $_FILES or raw data.
+			$files   = $request->get_file_params();
+			$headers = $request->get_headers();
+
+			if ( ! empty( $files ) ) {
+				$plugin_url = $this->upload_from_file( $files, $headers );
+			} else {
+				$plugin_url = $this->upload_from_data( $request->get_body(), $headers );
+			}
+
+			if ( is_wp_error( $plugin_url ) ) {
+				return $plugin_url;
+			}
+		}
+
 		$skin     = new WP_Ajax_Upgrader_Skin();
 		$upgrader = new Plugin_Upgrader( $skin );
 
@@ -798,14 +814,25 @@ class WP_REST_Plugins_Controller extends WP_REST_Controller {
 	}
 
 	/**
-	 * When installing a plugin via a POST create request, validate that one of either "url" or "slug" are present.
-	 * If both are present, the plugin URL must be a wordpress.org URL.
+	 * When installing a plugin via a POST create request, validate one of:
+	 * * the request $_FILES is populated
+	 * * the content type header indicated a zip file
+	 * * one of either "url" or "slug" are present
+	 * If both "url" and "zip" are present, the plugin URL must be a wordpress.org URL.
 	 *
 	 * @param WP_REST_Request $request
 	 *
 	 * @return bool
 	 */
 	public function validate_create_plugin_params( $request ) {
+
+		if ( ! empty( $request->get_file_params() ) ) {
+			return true;
+		}
+
+		if ( is_array( $request->get_content_type() ) && in_array( 'application/zip', $request->get_content_type(), true ) ) {
+			return true;
+		}
 
 		$xor_param_required      = array( 'slug', 'url' );
 		$request_params          = $request->get_params();
@@ -1041,4 +1068,155 @@ class WP_REST_Plugins_Controller extends WP_REST_Controller {
 
 		return $query_params;
 	}
+
+	/**
+	 * Handles an upload via multipart/form-data ($_FILES).
+	 *
+	 * Based on attachments controller.
+	 * @see WP_REST_Attachments_Controller::upload_from_file()
+	 *
+	 * @uses WP_REST_Attachments_Controller::check_upload_size()
+	 *
+	 * @since 6.2.0
+	 *
+	 * @param array $files   Data from the `$_FILES` superglobal.
+	 * @param array $headers HTTP headers from the request.
+	 * @return string|WP_Error Filepath of the uploaded plugin.
+	 */
+	protected function upload_from_file( $files, $headers ) {
+		if ( empty( $files ) ) {
+			return new WP_Error(
+				'rest_upload_no_data',
+				__( 'No data supplied.' ),
+				array( 'status' => 400 )
+			);
+		}
+
+		// Verify hash, if given.
+		if ( ! empty( $headers['content_md5'] ) ) {
+			$content_md5 = array_shift( $headers['content_md5'] );
+			$expected    = trim( $content_md5 );
+			$actual      = md5_file( $files['file']['tmp_name'] );
+
+			if ( $expected !== $actual ) {
+				return new WP_Error(
+					'rest_upload_hash_mismatch',
+					__( 'Content hash did not match expected.' ),
+					array( 'status' => 412 )
+				);
+			}
+		}
+
+		$size_check = WP_REST_Attachments_Controller::check_upload_size( $files['file'] );
+		if ( is_wp_error( $size_check ) ) {
+			return $size_check;
+		}
+
+		return $files['file']['tmp_name'];
+	}
+
+	/**
+	 * Handles an upload via raw POST data.
+	 *
+	 * Based on attachments controller.
+	 * @see WP_REST_Attachments_Controller::upload_from_data()
+	 *
+	 * @uses WP_REST_Attachments_Controller::get_filename_from_disposition()
+	 * @uses WP_REST_Attachments_Controller::check_upload_size()
+	 *
+	 * @since 6.2.0
+	 *
+	 * @param string $data    Supplied file data.
+	 * @param array $headers HTTP headers from the request.
+	 * @return string|WP_Error Filepath of the uploaded plugin.
+	 */
+	protected function upload_from_data( $data, $headers ) {
+		if ( empty( $data ) ) {
+			return new WP_Error(
+				'rest_upload_no_data',
+				__( 'No data supplied.' ),
+				array( 'status' => 400 )
+			);
+		}
+
+		if ( empty( $headers['content_type'] ) ) {
+			return new WP_Error(
+				'rest_upload_no_content_type',
+				__( 'No Content-Type supplied.' ),
+				array( 'status' => 400 )
+			);
+		}
+
+		if ( empty( $headers['content_disposition'] ) ) {
+			return new WP_Error(
+				'rest_upload_no_content_disposition',
+				__( 'No Content-Disposition supplied.' ),
+				array( 'status' => 400 )
+			);
+		}
+
+		$filename = WP_REST_Attachments_Controller::get_filename_from_disposition( $headers['content_disposition'] );
+
+		if ( empty( $filename ) ) {
+			return new WP_Error(
+				'rest_upload_invalid_disposition',
+				__( 'Invalid Content-Disposition supplied. Content-Disposition needs to be formatted as `attachment; filename="image.png"` or similar.' ),
+				array( 'status' => 400 )
+			);
+		}
+
+		if ( ! empty( $headers['content_md5'] ) ) {
+			$content_md5 = array_shift( $headers['content_md5'] );
+			$expected    = trim( $content_md5 );
+			$actual      = md5( $data );
+
+			if ( $expected !== $actual ) {
+				return new WP_Error(
+					'rest_upload_hash_mismatch',
+					__( 'Content hash did not match expected.' ),
+					array( 'status' => 412 )
+				);
+			}
+		}
+
+		// Get the content-type.
+		$type = array_shift( $headers['content_type'] );
+
+		// Include filesystem functions to get access to wp_tempnam().
+		require_once ABSPATH . 'wp-admin/includes/file.php';
+
+		// Save the file.
+		$tmpfname = wp_tempnam( $filename );
+
+		$fp = fopen( $tmpfname, 'w+' );
+
+		if ( ! $fp ) {
+			return new WP_Error(
+				'rest_upload_file_error',
+				__( 'Could not open file handle.' ),
+				array( 'status' => 500 )
+			);
+		}
+
+		fwrite( $fp, $data );
+		fclose( $fp );
+
+		/**
+		 * Use $_FILES format for checking upload size limits.
+		 */
+		$file_data = array(
+			'error'    => null,
+			'tmp_name' => $tmpfname,
+			'name'     => $filename,
+			'type'     => $type,
+		);
+
+		$size_check = WP_REST_Attachments_Controller::check_upload_size( $file_data );
+		if ( is_wp_error( $size_check ) ) {
+			return $size_check;
+		}
+
+		return $tmpfname;
+	}
+
 }

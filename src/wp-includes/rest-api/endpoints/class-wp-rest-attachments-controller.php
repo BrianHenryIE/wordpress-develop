@@ -1273,7 +1273,7 @@ class WP_REST_Attachments_Controller extends WP_REST_Posts_Controller {
 	 * @param array $file $_FILES array for a given file.
 	 * @return true|WP_Error True if can upload, error for errors.
 	 */
-	protected function check_upload_size( $file ) {
+	public static function check_upload_size( $file ) {
 		if ( ! is_multisite() ) {
 			return true;
 		}
